@@ -9,6 +9,7 @@ Requirements:
     pip install streamlit google-genai reportlab Pillow
 """
 
+import base64
 import io
 import json
 import os
@@ -363,7 +364,75 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — API KEY & CONFIGURATION
+# QUERY STRING API – EXTERNAL PROGRAMMATIC ACCESS
+# ═══════════════════════════════════════════════════════════════════════════════
+# This block intercepts requests with ?action=api_reconstruct and returns a
+# minimal page containing only the reconstructed PDF download button.
+# It runs BEFORE any interactive UI elements, keeping the normal dashboard
+# completely untouched for regular browser visitors.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if "action" in st.query_params and st.query_params["action"] == "api_reconstruct":
+    try:
+        # --- Payload decoding -----------------------------------------------
+        payload_b64 = st.query_params.get("payload")
+        if not payload_b64:
+            st.error("Missing 'payload' query parameter (base64-encoded image).")
+            st.stop()
+
+        try:
+            # Support both standard and URL-safe base64
+            image_bytes = base64.urlsafe_b64decode(payload_b64 + "===")
+        except Exception:
+            image_bytes = base64.b64decode(payload_b64)
+
+        # --- Optional MIME type ---------------------------------------------
+        mime_type = st.query_params.get("mime", "image/png")
+        if mime_type not in ("image/png", "image/jpeg"):
+            mime_type = "image/png"
+
+        # --- API key from environment ---------------------------------------
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        if not api_key:
+            st.error("Server configuration error: GOOGLE_API_KEY not set.")
+            st.stop()
+
+        # --- Gemini Vision analysis + PDF reconstruction --------------------
+        with st.spinner("🔍 Analyzing layout with Gemini Vision..."):
+            elements, _ = analyze_image_with_gemini(
+                api_key=api_key,
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+            )
+
+        doc_title = st.query_params.get("title", "API Export").strip()
+        if not doc_title:
+            doc_title = "API Export"
+
+        with st.spinner("📄 Reconstructing PDF layout..."):
+            pdf_bytes = reconstruct_pdf(elements=elements, doc_title=doc_title)
+
+        # --- Minimal output page --------------------------------------------
+        st.success("✅ Layout reconstructed successfully.")
+        safe_name = re.sub(r'[^\w\-_.]', '_', doc_title)
+        st.download_button(
+            label="⬇️ Download Reconstructed PDF",
+            data=pdf_bytes,
+            file_name=f"{safe_name}_reconstructed.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    except Exception as exc:
+        # Clean fallback – never crash the container with a 500 error
+        st.error(f"Reconstruction failed: {exc}")
+
+    # Stop execution here; do not render the full interactive UI
+    st.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR — API KEY & CONFIGURATION (REGULAR INTERACTIVE SESSION)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 with st.sidebar:
