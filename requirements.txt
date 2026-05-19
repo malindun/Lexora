@@ -1,0 +1,6 @@
+google-genai
+reportlab
+pillow
+streamlit
+fastapi
+uvicorn
