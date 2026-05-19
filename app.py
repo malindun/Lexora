@@ -11,11 +11,17 @@ Requirements:
 
 import io
 import json
+import os
 import re
+import threading
 import time
 import traceback
 
 import streamlit as st
+import uvicorn
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from PIL import Image
 
 # ── ReportLab imports ────────────────────────────────────────────────────────
@@ -41,6 +47,76 @@ except ImportError:
         "`pip install google-genai`"
     )
     st.stop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FASTAPI BRIDGE — PARALLEL REST API ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+api_bridge = FastAPI(title="Doc Reconstructor API Bridge", version="1.0.0")
+
+api_bridge.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@api_bridge.post("/reconstruct")
+async def api_reconstruct_layout(file: UploadFile = File(...)):
+    """
+    Accepts an uploaded image (PNG or JPEG) and returns a reconstructed PDF
+    as a downloadable binary response. Intended for automated external callers.
+    """
+    try:
+        image_bytes = await file.read()
+
+        # Determine MIME type from filename or content-type header
+        filename = (file.filename or "").lower()
+        content_type = (file.content_type or "").lower()
+        if filename.endswith(".png") or "png" in content_type:
+            mime_type = "image/png"
+        else:
+            mime_type = "image/jpeg"
+
+        # Retrieve the API key from the environment (set via GOOGLE_API_KEY)
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+        if not api_key:
+            return Response(
+                content=json.dumps({"error": "GOOGLE_API_KEY environment variable is not set."}),
+                media_type="application/json",
+                status_code=500,
+            )
+
+        # Run core engine: Gemini Vision analysis → PDF reconstruction
+        elements, _raw = analyze_image_with_gemini(
+            api_key=api_key,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+        )
+        pdf_bytes = reconstruct_pdf(elements=elements, doc_title="API Export")
+
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": 'attachment; filename="reconstructed.pdf"',
+                "Content-Length": str(len(pdf_bytes)),
+            },
+        )
+
+    except Exception as exc:
+        error_detail = {
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+        return Response(
+            content=json.dumps(error_detail),
+            media_type="application/json",
+            status_code=500,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1174,3 +1250,19 @@ st.markdown(
     "Built with Streamlit</p>",
     unsafe_allow_html=True,
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BACKGROUND API THREAD BOOTSTRAP
+# Bootstrap the FastAPI bridge on port 8000 in a daemonized background thread.
+# The _API_BRIDGE_STARTED flag prevents duplicate listener instances when
+# Streamlit's hot-reload mechanism re-executes this module.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if not os.environ.get("_API_BRIDGE_STARTED"):
+    os.environ["_API_BRIDGE_STARTED"] = "1"
+
+    def _run_api_bridge():
+        uvicorn.run(api_bridge, host="0.0.0.0", port=8000, log_level="warning")
+
+    threading.Thread(target=_run_api_bridge, daemon=True).start()
